@@ -10,11 +10,13 @@ export function useGame() {
   const currentChannel = useRef('ch-01');
   const joinedChannel = useRef(null);
   const nameRef = useRef(localStorage.getItem('yeomju-name') || '이름 없는 순례자');
-  const genderRef = useRef(localStorage.getItem('yeomju-gender') || null);
   const notice = useCallback((text, kind = 'info') => {
     const id = crypto.randomUUID();
-    setNotices((old) => [...old.slice(-3), { id, text, kind }]);
-    setTimeout(() => setNotices((old) => old.filter((n) => n.id !== id)), 5000);
+    setNotices((old) => [...old.slice(-1), { id, text, kind }]);
+    setTimeout(
+      () => setNotices((old) => old.filter((n) => n.id !== id)),
+      kind === 'error' ? 5000 : 3200,
+    );
   }, []);
 
   useEffect(() => {
@@ -27,11 +29,8 @@ export function useGame() {
       try {
         const response = await fetch('/api/session', { credentials: 'same-origin' });
         if (!response.ok) throw new Error('세션을 열지 못했어요');
-        const profile = await response.json();
+        await response.json();
         if (disposed) return;
-        // The saved session wins on reconnect, including in another browser tab.
-        genderRef.current = profile.gender === 'female' ? 'female' : 'male';
-        localStorage.setItem('yeomju-gender', genderRef.current);
         const socket = new WebSocket(
           `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`,
         );
@@ -65,7 +64,6 @@ export function useGame() {
                   type: 'join',
                   channelId: target.id,
                   name: nameRef.current,
-                  gender: genderRef.current || undefined,
                 }),
               );
             else {
@@ -102,7 +100,6 @@ export function useGame() {
                         type: 'join',
                         channelId: target.id,
                         name: nameRef.current,
-                        gender: genderRef.current || undefined,
                       }),
                     );
                   else setStatus('full');
@@ -165,7 +162,6 @@ export function useGame() {
           type: 'join',
           channelId,
           name: nameRef.current,
-          gender: genderRef.current || undefined,
         })
       ) {
         notice('산사에 다시 연결하고 있어요. 잠시만 기다려 주세요.');
@@ -174,16 +170,13 @@ export function useGame() {
     [send, notice],
   );
   const rename = useCallback(
-    (name, gender = genderRef.current || 'male') => {
+    (name) => {
       nameRef.current = name.trim().slice(0, 16) || '이름 없는 순례자';
-      genderRef.current = gender === 'female' ? 'female' : 'male';
       localStorage.setItem('yeomju-name', nameRef.current);
-      localStorage.setItem('yeomju-gender', genderRef.current);
       send({
         type: 'join',
         channelId: currentChannel.current,
         name: nameRef.current,
-        gender: genderRef.current,
       });
     },
     [send],

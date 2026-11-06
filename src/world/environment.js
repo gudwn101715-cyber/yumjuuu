@@ -1,4 +1,5 @@
 import { HALLS, NODES } from '../../shared/game.js';
+import { INCENSE_STATIONS } from '../../shared/templeLayout.js';
 
 /** A continuous, walkable mountain-temple landscape, designed for human eye height. */
 export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) {
@@ -9,6 +10,9 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
   };
   const ownedMaterials = [],
     ownedTextures = [];
+  const effects = new THREE.Group();
+  effects.name = 'courtyard-incense-effects';
+  const queueClearance = (x, z) => x > -20 && x < -7 && z > 4 && z < 28;
   const material = (name, color, options = {}) => {
     if (materials[name]) return materials[name];
     const m = new THREE.MeshStandardMaterial({ color, roughness: 0.94, ...options });
@@ -140,10 +144,10 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
     ownedMaterials.push(mat);
     mesh(geometry, mat, 0, 0, 0, false);
   }
-  mountainRing(132, 30, '#4c6350', 144, 3.2);
-  mountainRing(164, 47, '#617563', 152, 5.3);
-  mountainRing(205, 65, '#76887a', 160, 1.2);
-  mountainRing(280, 87, '#91a195', 168, 4.1);
+  mountainRing(132, 30, '#71945f', 144, 3.2);
+  mountainRing(164, 47, '#81a17b', 152, 5.3);
+  mountainRing(205, 65, '#8daea2', 160, 1.2);
+  mountainRing(280, 87, '#a2c1bf', 168, 4.1);
 
   // The courtyard is a worn oval of packed mineral earth, not a featureless lawn.
   const courtyardPoints = [
@@ -172,7 +176,18 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
   const courtMesh = mesh(courtyard, M.dirt, 0, -0.014, 0, false);
   courtMesh.material.side = THREE.DoubleSide;
 
-  function ribbon(points, width, mat = M.dirt, y = 0.009) {
+  let ribbonLayer = 0;
+  function ribbon(points, width, mat = M.dirt, elevation = null) {
+    // Crossing ribbons had different UVs at exactly the same depth. Separate
+    // their surfaces so the courtyard never flashes between competing texels.
+    const layer = ribbonLayer++;
+    const y = elevation ?? 0.002 + layer * 0.006;
+    const pathMaterial = mat.clone();
+    pathMaterial.side = THREE.DoubleSide;
+    pathMaterial.polygonOffset = true;
+    pathMaterial.polygonOffsetFactor = -0.4;
+    pathMaterial.polygonOffsetUnits = -1;
+    ownedMaterials.push(pathMaterial);
     const curve = new THREE.CatmullRomCurve3(points.map(([x, z]) => new THREE.Vector3(x, y, z)));
     const vertices = [],
       uvs = [],
@@ -199,8 +214,7 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
     g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     g.setIndex(indices);
     g.computeVertexNormals();
-    const m = mesh(g, mat, 0, 0, 0, false);
-    m.material.side = THREE.DoubleSide;
+    mesh(g, pathMaterial, 0, 0, 0, false);
   }
   ribbon(
     [
@@ -354,7 +368,7 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
     ],
     2.7,
     M.water,
-    0.02,
+    0.029,
   );
   for (let i = 0; i < 15; i++) {
     box(4.5, 0.09, 0.38, M.wood, 0, 0.03, 47.5 + i * 0.38, (random() - 0.5) * 0.012);
@@ -486,12 +500,13 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
   }
   stoneLantern(-7.5, 5.7);
   stoneLantern(7.5, 5.7);
-  stoneLantern(-10.2, 21.8);
+  stoneLantern(-6, 21.8);
   stoneLantern(10.4, 22.2);
   for (const side of [-1, 1])
     for (let i = 0; i < 12; i++) {
       const x = side * (12.5 + random() * 5.3),
         z = -1 + i * 2.7;
+      if (queueClearance(x, z)) continue;
       if (i % 3 === 0) rock(x, z, 0.45 + random() * 0.3, true);
       fern(x + side * 0.6, z, 0.5 + random() * 0.45);
       grassClump(x - side * 0.7, z + 0.4, 0.7 + random() * 0.5);
@@ -522,7 +537,7 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
             px = 128 + (tipX - 128) * t,
             py = by + 10 + (tipY - by - 10) * t;
           const length = 12 + random() * 19;
-          ctx.strokeStyle = ['#273c29', '#344d32', '#48613c', '#5e7447'][Math.floor(random() * 4)];
+          ctx.strokeStyle = ['#3b653c', '#4d7746', '#62874f', '#7f9b5a'][Math.floor(random() * 4)];
           ctx.lineWidth = 1.25 + random() * 0.7;
           for (const sign of [-1, 1]) {
             ctx.beginPath();
@@ -632,6 +647,7 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     });
     ownedMaterials.push(treeShadowMaterial);
   }
@@ -724,12 +740,13 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
     treeContact(x, z, s * 1.2);
   }
   // Low, spreading Korean red-pine crowns frame the human-scale approach.
-  redPine(-11.8, 13.5, 0.93, -1);
+  redPine(-23.8, 13.5, 0.93, -1);
   redPine(12.7, 12.4, 1.02, 1);
-  redPine(-16.4, 26.5, 1.08, 1);
+  redPine(-24.4, 26.5, 1.08, 1);
   redPine(17.0, 29.2, 0.96, -1);
 
   const treeClear = (x, z) => {
+    if (queueClearance(x, z)) return false;
     if (Math.abs(x) < 6) return false;
     if (Math.abs(x) < 19 && z > -13 && z < 35) return false;
     if (NODES.some((n) => Math.hypot(n.x - x, n.z - z) < 5.5)) return false;
@@ -870,9 +887,56 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
     }
   }
 
+  // These eighteen soft points stay outside the static material batches. Their
+  // small, translucent wisps suggest lit incense without obscuring the courtyard.
+  const smokeCount = INCENSE_STATIONS.length * 18;
+  const smokeGeometry = new THREE.BufferGeometry();
+  const smokePositions = new Float32Array(smokeCount * 3);
+  smokeGeometry.setAttribute('position', new THREE.BufferAttribute(smokePositions, 3));
+  const smokePixels = new Uint8Array(32 * 32 * 4);
+  for (let iy = 0; iy < 32; iy++)
+    for (let ix = 0; ix < 32; ix++) {
+      const radius = Math.hypot((ix - 15.5) / 15.5, (iy - 15.5) / 15.5);
+      const alpha = Math.max(0, 1 - radius);
+      smokePixels.set([255, 255, 255, Math.round(alpha * alpha * 180)], (iy * 32 + ix) * 4);
+    }
+  const smokeTexture = new THREE.DataTexture(smokePixels, 32, 32, THREE.RGBAFormat);
+  smokeTexture.needsUpdate = true;
+  smokeTexture.magFilter = THREE.LinearFilter;
+  smokeTexture.minFilter = THREE.LinearFilter;
+  ownedTextures.push(smokeTexture);
+  const smokeMaterial = new THREE.PointsMaterial({
+    color: '#e9e5d8',
+    map: smokeTexture,
+    transparent: true,
+    opacity: 0.14,
+    size: 0.26,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  ownedMaterials.push(smokeMaterial);
+  const smoke = new THREE.Points(smokeGeometry, smokeMaterial);
+  smoke.name = 'thin-courtyard-incense-smoke';
+  smoke.frustumCulled = false;
+  effects.add(smoke);
+  function updateSmoke(time) {
+    for (let i = 0; i < smokeCount; i++) {
+      const station = INCENSE_STATIONS[Math.floor(i / 18)];
+      const phase = (time * 0.15 + (i % 18) / 18) % 1;
+      const offset = i * 3;
+      smokePositions[offset] = station.x + Math.sin(phase * 5 + i) * phase * 0.22;
+      smokePositions[offset + 1] = (station.y || 0) + 1.21 + phase * 1.12;
+      smokePositions[offset + 2] = station.z + Math.cos(phase * 4 + i * 0.8) * phase * 0.1;
+    }
+    smokeGeometry.attributes.position.needsUpdate = true;
+  }
+  updateSmoke(0);
+
   return {
     waterMeshes,
+    effects,
     update({ time = 0 } = {}) {
+      updateSmoke(time);
       const normal = M.water.normalMap || M.water.bumpMap;
       if (normal) {
         normal.offset.x = time * 0.004;
@@ -880,6 +944,8 @@ export function buildNaturalEnvironment({ THREE, root, materials = {}, world }) 
       }
     },
     dispose() {
+      effects.removeFromParent();
+      smokeGeometry.dispose();
       ownedMaterials.forEach((m) => m.dispose());
       ownedTextures.forEach((t) => t.dispose());
       sprayGeometry.dispose();

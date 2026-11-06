@@ -1,4 +1,4 @@
-import { HALL_LAYOUTS, SEATS } from '../../shared/templeLayout.js';
+import { HALL_LAYOUTS, SEATS, INCENSE_STATIONS } from '../../shared/templeLayout.js';
 
 /**
  * Korean temple architecture built for a human-height, third-person camera.
@@ -556,7 +556,17 @@ export function buildTempleArchitecture({ THREE, root, halls, materials: M }) {
           );
       }
     }
-    box(platformW + 0.15, 0.18, platformD + 0.15, M.stoneLight, x, floor + 0.11, z);
+    // Stone is an apron around the timber floor, not a full slab underneath it.
+    // The old slab and plank tops were both exactly floor + .20, so their
+    // overlapping triangles flickered between white granite and wood as viewed.
+    const capW = platformW;
+    const capD = platformD;
+    const apronD = (capD - d) / 2;
+    const apronW = (capW - w) / 2;
+    for (const side of [-1, 1]) {
+      box(capW, 0.18, apronD, M.stoneLight, x, floor + 0.11, z + (side * (d + apronD)) / 2);
+      box(apronW, 0.18, d, M.stoneLight, x + (side * (w + apronW)) / 2, floor + 0.11, z);
+    }
     box(w, 0.2, d, M.woodDark, x, floor + 0.02, z);
     const boards = Math.ceil(w / 0.68);
     for (let board = 0; board < boards; board++)
@@ -576,7 +586,7 @@ export function buildTempleArchitecture({ THREE, root, halls, materials: M }) {
       box(
         layout.stairsWidth,
         height,
-        layout.stairsDepth + 0.035,
+        layout.stairsDepth,
         step % 2 ? M.stoneLight : M.stone,
         x,
         height / 2,
@@ -802,7 +812,7 @@ export function buildTempleArchitecture({ THREE, root, halls, materials: M }) {
         runnerLength,
         cushionBorder,
         x + side * 1.26,
-        floor + 0.216,
+        floor + 0.221,
         front - 1.4 - runnerLength / 2,
       );
     SEATS.filter((seat) => seat.hallId === hall.id).forEach(meditationSeat);
@@ -815,6 +825,40 @@ export function buildTempleArchitecture({ THREE, root, halls, materials: M }) {
       collider(0.5, wallHeight, d, x + (side * w) / 2, floor + wallHeight / 2, z);
     collider(roofW, 0.55, roofD, x, eave + 0.25, z);
   });
+
+  // The shared queue uses one approachable courtyard censer. Keep its bowl
+  // low enough for the smaller monks to offer incense without a tall pedestal.
+  for (const station of INCENSE_STATIONS) {
+    const { x, z } = station;
+    const y = station.y || 0;
+    cylinder(0.67, 0.76, 0.12, M.stoneLight, x, y + 0.06, z, 24);
+    cylinder(0.4, 0.52, 0.12, M.stoneDark, x, y + 0.18, z, 20);
+    for (const dx of [-0.26, 0.26]) cylinder(0.065, 0.09, 0.3, M.gold, x + dx, y + 0.36, z, 12);
+    cylinder(0.49, 0.33, 0.27, M.gold, x, y + 0.59, z, 28);
+    cylinder(0.51, 0.51, 0.065, M.goldLight, x, y + 0.755, z, 28);
+    cylinder(0.425, 0.425, 0.032, M.stoneLight, x, y + 0.797, z, 24);
+    for (let i = 0; i < 5; i++) {
+      const xx = x + (i - 2) * 0.09;
+      const zz = z + (i % 2 ? -0.08 : 0.05);
+      const tip = y + 1.19 + (i % 3) * 0.045;
+      cylinder(0.009, 0.011, tip - (y + 0.8), M.woodDark, xx, (tip + y + 0.8) / 2, zz, 6);
+      sphere(0.014, M.flame || M.goldLight, xx, tip, zz, [1, 0.7, 1]);
+    }
+    for (const side of [-1, 1]) {
+      const handle = add(
+        new THREE.TorusGeometry(0.105, 0.028, 6, 16),
+        M.goldLight,
+        x + side * 0.55,
+        y + 0.66,
+        z,
+      );
+      handle.rotation.y = Math.PI / 2;
+    }
+    // A single pair of quiet inlaid stones marks where the waiting line begins.
+    const entrance = station.entrance;
+    for (const side of [-1, 1])
+      box(0.12, 0.025, 0.55, M.stoneLight, entrance.x + side * 0.5, 0.028, entrance.z);
+  }
 
   return {
     colliders,

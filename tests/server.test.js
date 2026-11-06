@@ -7,8 +7,18 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
 import { createGameServer } from '../server/index.js';
-import { CHANNELS, ITEMS, HALLS, NODES, BASE_MOVE_SPEED, computeStats } from '../shared/game.js';
-import { SEATS } from '../shared/templeLayout.js';
+import {
+  CHANNELS,
+  ITEMS,
+  HALLS,
+  NODES,
+  BASE_MOVE_SPEED,
+  BASE_BOW_DURATION,
+  bowDropChance,
+  computeStats,
+} from '../shared/game.js';
+import { SEATS, INCENSE_STATIONS, incenseQueuePosition } from '../shared/templeLayout.js';
+import { findWalkPath } from '../shared/worldCollision.js';
 
 async function fixture(t, options = {}) {
   let time = 100000;
@@ -82,16 +92,25 @@ async function client(f, channelId = 'ch-01', existingSession) {
 
 async function moveTo(f, c, x, z) {
   let last = c.packets.findLast((packet) => packet.type === 'state') || c.state;
-  for (let i = 0; i < 60 && Math.hypot(last.self.x - x, last.self.z - z) > 0.1; i++) {
-    f.advance(300);
-    const before = { x: last.self.x, z: last.self.z };
-    const changed = c.wait(
-      (packet) =>
-        packet.type === 'state' &&
-        Math.hypot(packet.self.x - before.x, packet.self.z - before.z) > 0.01,
-    );
-    c.send({ type: 'move', x, z });
-    last = await changed;
+  const route = findWalkPath(last.self, { x, z });
+  assert.ok(route.length, 'target is reachable through open doors and stairs');
+  for (const waypoint of route) {
+    for (
+      let i = 0;
+      i < 120 && Math.hypot(last.self.x - waypoint.x, last.self.z - waypoint.z) > 0.08;
+      i++
+    ) {
+      f.advance(300);
+      const before = { x: last.self.x, z: last.self.z };
+      const changed = c.wait(
+        (packet) =>
+          packet.type === 'state' &&
+          packet.serverTime === f.now() &&
+          Math.hypot(packet.self.x - before.x, packet.self.z - before.z) > 0.01,
+      );
+      c.send({ type: 'move', ...waypoint });
+      last = await changed;
+    }
   }
   assert.ok(
     Math.hypot(last.self.x - x, last.self.z - z) < 0.2,
@@ -105,9 +124,9 @@ test('session cookie, starter equipment, ten channels, and reconnect identity', 
   const auth = await session(f.base);
   assert.match(auth.setCookie, /HttpOnly/);
   assert.match(auth.setCookie, /SameSite=Lax/);
-  assert.equal(auth.profile.gender, 'male');
+  assert.equal('gender' in auth.profile, false);
   const c = await client(f, 'ch-01', auth);
-  assert.equal(c.state.self.gender, 'male');
+  assert.equal('gender' in c.state.self, false);
   assert.equal(c.state.self.inventory.length, 4);
   assert.equal(c.state.self.equipped.beads.length, 3);
   assert.deepEqual(c.state.self.stats, { moveSpeed: 0, bowSpeed: 3, dropRate: 0, capacity: 8 });
@@ -127,58 +146,38 @@ test('session cookie, starter equipment, ten channels, and reconnect identity', 
   assert.deepEqual(again.state.self.inventory, c.state.self.inventory);
 });
 
-test('gender customization updates same-channel presence and survives optional joins and reconnects', async (t) => {
+test('gassho is a separate synchronized pose without bow progress or rewards', async (t) => {
   const f = await fixture(t);
   const a = await client(f);
   const b = await client(f);
-  const customized = a.wait((packet) => packet.type === 'state' && packet.self.gender === 'female');
-  const visibleToOther = b.wait(
+  const initial = a.state.self.inventory.length;
+  const joined = a.wait((packet) => packet.type === 'state' && packet.self.gassho === true);
+  a.send({ type: 'gassho' });
+  const posing = await joined;
+  assert.equal(posing.self.bowingUntil, 0);
+  assert.equal(posing.self.bows, 0);
+  assert.equal(posing.self.inventory.length, initial);
+  await b.wait(
     (packet) =>
       packet.type === 'state' &&
-      packet.players.some(
-        (player) => player.id === a.auth.profile.id && player.gender === 'female',
-      ),
+      packet.players.some((player) => player.id === a.auth.profile.id && player.gassho),
   );
-  a.send({ type: 'join', channelId: 'ch-01', gender: 'female' });
-  assert.equal((await customized).self.gender, 'female');
-  await visibleToOther;
-  assert.equal((await session(f.base, a.auth.cookie)).profile.gender, 'female');
-
-  for (const gender of ['invalid', null, { value: 'male' }]) {
-    const invalid = a.wait((packet) => packet.code === 'INVALID_GENDER');
-    const unchanged = a.wait(
-      (packet) => packet.type === 'state' && packet.self.gender === 'female',
-    );
-    a.send({ type: 'join', channelId: 'ch-01', gender });
-    await invalid;
-    assert.equal(
-      (await unchanged).self.gender,
-      'female',
-      'invalid enum values preserve appearance',
-    );
-  }
-  const renamed = a.wait(
-    (packet) => packet.type === 'state' && packet.self.name === '고요한 수행자',
+  f.advance(10000);
+  const unchanged = await a.wait(
+    (packet) => packet.type === 'state' && packet.serverTime === f.now(),
   );
-  a.send({ type: 'join', channelId: 'ch-01', name: '고요한 수행자' });
-  assert.equal((await renamed).self.gender, 'female', 'omitting gender preserves the saved choice');
-  const switched = b.wait((packet) => packet.type === 'state' && packet.channel.id === 'ch-02');
-  b.send({ type: 'join', channelId: 'ch-02', gender: 'female' });
+  assert.equal(unchanged.self.bows, 0);
+  assert.equal(unchanged.self.inventory.length, initial);
   assert.equal(
-    (await switched).self.gender,
-    'female',
-    'a channel join also accepts a valid choice',
+    unchanged.halls.every((hall) => hall.progress === 0),
+    true,
   );
-
-  a.ws.close();
-  await once(a.ws, 'close');
-  const again = await client(f, 'ch-01', a.auth);
-  assert.equal(again.state.self.gender, 'female');
-  const optionalSwitch = again.wait(
-    (packet) => packet.type === 'state' && packet.channel.id === 'ch-03',
-  );
-  again.send({ type: 'join', channelId: 'ch-03' });
-  assert.equal((await optionalSwitch).self.gender, 'female');
+  const released = a.wait((packet) => packet.type === 'state' && packet.self.gassho === false);
+  a.send({ type: 'gassho' });
+  await released;
+  const renamed = a.wait((packet) => packet.type === 'state' && packet.self.name === '둥근 수행자');
+  a.send({ type: 'join', channelId: 'ch-01', name: '둥근 수행자', gender: 'female' });
+  assert.equal('gender' in (await renamed).self, false, 'legacy client gender packets are ignored');
 });
 
 test('multiplayer presence and chat stay in their channel; teleport attempts are clamped', async (t) => {
@@ -264,7 +263,7 @@ test('seating validates reach, reserves each cushion per channel, and retains se
   a.send({ type: 'bow', hallId: seat.hallId });
   assert.equal((await bowing).self.seatId, seat.id);
   const completed = a.wait((packet) => packet.type === 'state' && packet.self.bows === 1);
-  f.advance(3100);
+  f.advance(4300);
   const bowed = await completed;
   assert.equal(bowed.self.seatId, seat.id);
   assert.equal(bowed.halls.find((hall) => hall.id === seat.hallId).progress, 1);
@@ -360,27 +359,41 @@ test('gather requires reach, has shared cooldown, awards theme loot, and equips 
   assert.equal((await unequipped).self.stats.moveSpeed, 0);
 });
 
-test('timed bows are cancellable and 108 shared bows reward only contributors in that hall/channel', async (t) => {
+test('bows require cushions, cancel on movement, and cooperative rewards stay in their channel', async (t) => {
   const f = await fixture(t);
   const a = await client(f);
   const b = await client(f);
   const isolated = await client(f, 'ch-02');
   const hall = HALLS[0];
-  const denied = a.wait((packet) => packet.type === 'notice' && packet.kind === 'error');
+  const seats = SEATS.filter((entry) => entry.hallId === hall.id);
+  const seatA = seats[3];
+  const seatB = seats[4];
+  const denied = a.wait((packet) => packet.code === 'SEAT_REQUIRED');
   a.send({ type: 'bow', hallId: hall.id });
-  assert.match((await denied).text, /법당/);
-  await moveTo(f, a, hall.x, hall.z);
+  assert.match((await denied).text, /방석/);
+  await moveTo(f, a, seatA.x, seatA.z);
+  const seatedA = a.wait((packet) => packet.type === 'state' && packet.self.seatId === seatA.id);
+  a.send({ type: 'sit', seatId: seatA.id });
+  await seatedA;
   const bowing = a.wait((packet) => packet.type === 'state' && packet.self.bowingUntil > f.now());
   a.send({ type: 'bow', hallId: hall.id });
   const started = await bowing;
   assert.equal(started.self.bows, 0);
+  assert.equal(started.self.bowStartedAt, f.now());
+  assert.equal(started.self.bowDuration, BASE_BOW_DURATION / 1.03);
   f.advance(100);
   const cancelled = a.wait(
-    (packet) => packet.type === 'state' && packet.self.bowingUntil === 0 && packet.self.x > 0,
+    (packet) => packet.type === 'state' && packet.self.bowingUntil === 0 && packet.self.x > seatA.x,
   );
-  a.send({ type: 'move', x: 1, z: hall.z });
+  a.send({ type: 'move', x: seatA.x + 1, z: seatA.z });
   assert.equal((await cancelled).self.bows, 0);
-  await moveTo(f, b, hall.x, hall.z);
+  const reseated = a.wait((packet) => packet.type === 'state' && packet.self.seatId === seatA.id);
+  a.send({ type: 'sit', seatId: seatA.id });
+  await reseated;
+  await moveTo(f, b, seatB.x, seatB.z);
+  const seatedB = b.wait((packet) => packet.type === 'state' && packet.self.seatId === seatB.id);
+  b.send({ type: 'sit', seatId: seatB.id });
+  await seatedB;
   f.game.rooms.get('ch-01').halls[0].progress = 106;
   const first = a.wait((packet) => packet.type === 'state' && packet.self.bowingUntil > f.now());
   const second = b.wait((packet) => packet.type === 'state' && packet.self.bowingUntil > f.now());
@@ -395,7 +408,7 @@ test('timed bows are cancellable and 108 shared bows reward only contributors in
     (packet) =>
       packet.type === 'state' && packet.self.bows === 1 && packet.self.inventory.length === 6,
   );
-  f.advance(3100);
+  f.advance(4300);
   const completed = await Promise.all([rewardA, rewardB]);
   assert.equal(completed[0].halls[0].progress, 0);
   assert.equal(completed[1].halls[0].progress, 0);
@@ -404,6 +417,111 @@ test('timed bows are cancellable and 108 shared bows reward only contributors in
     isolated.packets.findLast((packet) => packet.type === 'state').self.inventory.length,
     4,
   );
+});
+
+test('individual bows use an uncommon drop roll rather than a guaranteed item', async (t) => {
+  const f = await fixture(t, { random: () => 0.5 });
+  const c = await client(f);
+  const seat = SEATS[3];
+  await moveTo(f, c, seat.x, seat.z);
+  const seated = c.wait((packet) => packet.type === 'state' && packet.self.seatId === seat.id);
+  c.send({ type: 'sit', seatId: seat.id });
+  await seated;
+  for (let count = 1; count <= 3; count++) {
+    const started = c.wait(
+      (packet) => packet.type === 'state' && packet.self.bowingUntil > f.now(),
+    );
+    c.send({ type: 'bow', hallId: seat.hallId });
+    await started;
+    const completed = c.wait((packet) => packet.type === 'state' && packet.self.bows === count);
+    f.advance(4300);
+    assert.equal((await completed).self.inventory.length, 4);
+  }
+  assert.equal(bowDropChance(), 0.08);
+  assert.equal(bowDropChance({ dropRate: 25 }), 0.11);
+  assert.equal(bowDropChance({ dropRate: 100 }), 0.2);
+  assert.equal(bowDropChance({ dropRate: 10000 }), 0.2);
+  assert.equal(bowDropChance({ dropRate: -100 }), 0.08);
+});
+
+test('incense queues are FIFO, channel-local, and only serve the player at the front', async (t) => {
+  const f = await fixture(t);
+  const a = await client(f);
+  const b = await client(f);
+  const isolated = await client(f, 'ch-02');
+  const station = INCENSE_STATIONS[0];
+  const denied = a.wait((packet) => packet.code === 'INCENSE_TOO_FAR');
+  a.send({ type: 'queueIncense', stationId: station.id });
+  await denied;
+  await moveTo(f, a, station.entrance.x, station.entrance.z);
+  const joinedA = a.wait(
+    (packet) => packet.type === 'state' && packet.self.incenseQueueIndex === 0,
+  );
+  a.send({ type: 'queueIncense', stationId: station.id });
+  await joinedA;
+  await moveTo(f, b, station.entrance.x, station.entrance.z);
+  const joinedB = b.wait(
+    (packet) => packet.type === 'state' && packet.self.incenseQueueIndex === 1,
+  );
+  b.send({ type: 'queueIncense', stationId: station.id });
+  const queuedB = await joinedB;
+  assert.deepEqual(queuedB.incenseStations[0].queue, [a.auth.profile.id, b.auth.profile.id]);
+  assert.equal(queuedB.self.incenseOfferingUntil, 0);
+  assert.deepEqual(
+    isolated.packets.findLast((packet) => packet.type === 'state').incenseStations[0].queue,
+    [],
+  );
+  const front = incenseQueuePosition(0, station.id);
+  await moveTo(f, a, front.x, front.z);
+  const serving = await a.wait(
+    (packet) => packet.type === 'state' && packet.self.incenseOfferingUntil > f.now(),
+    0,
+  );
+  const inventory = serving.self.inventory.length;
+  const completed = a.wait(
+    (packet) => packet.type === 'notice' && packet.kind === 'incense-complete',
+  );
+  const promoted = b.wait(
+    (packet) => packet.type === 'state' && packet.self.incenseQueueIndex === 0,
+  );
+  f.advance(station.duration + 1);
+  await completed;
+  const first = await promoted;
+  assert.equal(first.self.incenseOfferingUntil, 0, 'promotion alone does not start the offering');
+  const after = await a.wait(
+    (packet) => packet.type === 'state' && packet.self.incenseStationId === null,
+  );
+  assert.equal(after.self.inventory.length, inventory, 'incense does not grant a guaranteed item');
+  assert.equal(after.self.incenseOfferings, 1);
+  const left = b.wait((packet) => packet.type === 'state' && packet.self.incenseStationId === null);
+  b.send({ type: 'leaveIncense' });
+  assert.deepEqual((await left).incenseStations[0].queue, []);
+  for (let index = 0; index < 108; index++) {
+    const position = incenseQueuePosition(index);
+    assert.ok(position.x >= -76 && position.x <= 76 && position.z >= -76 && position.z <= 64);
+  }
+});
+
+test('incense queues release places on disconnects and channel switches', async (t) => {
+  const f = await fixture(t);
+  const a = await client(f);
+  const b = await client(f);
+  const station = INCENSE_STATIONS[0];
+  for (const c of [a, b]) {
+    await moveTo(f, c, station.entrance.x, station.entrance.z);
+    const queued = c.wait(
+      (packet) => packet.type === 'state' && packet.self.incenseStationId === station.id,
+    );
+    c.send({ type: 'queueIncense', stationId: station.id });
+    await queued;
+  }
+  a.ws.close();
+  await once(a.ws, 'close');
+  await b.wait((packet) => packet.type === 'state' && packet.self.incenseQueueIndex === 0);
+  const switched = b.wait((packet) => packet.type === 'state' && packet.channel.id === 'ch-02');
+  b.send({ type: 'join', channelId: 'ch-02' });
+  assert.equal((await switched).self.incenseStationId, null);
+  assert.deepEqual(f.game.rooms.get('ch-01').incenseStations[0].queue, []);
 });
 
 test('channel capacity rejects extra clients; cross-origin websocket upgrades are forbidden', async (t) => {
@@ -454,7 +572,33 @@ test('default channel accepts 108 simultaneous sockets and rejects a 109th playe
   assert.equal(health.online, 109, 'overflow player remains in the other channel');
 });
 
-test('SQLite preserves inventory, equipment, and gender; legacy profiles default to male', async (t) => {
+test('server movement blocks thin structures even when clients send coordinates beyond them', async (t) => {
+  const f = await fixture(t);
+  const c = await client(f);
+  await moveTo(f, c, -15, -11);
+  let last;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    f.advance(300);
+    const next = c.wait((packet) => packet.type === 'state' && packet.serverTime === f.now());
+    c.send({ type: 'move', x: -50, z: -11 });
+    last = await next;
+  }
+  assert.ok(last.self.x > -17 && last.self.x < -16.9, 'west wall stops an untrusted client');
+  assert.equal(last.self.z, -11);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    f.advance(300);
+    const next = c.wait((packet) => packet.type === 'state' && packet.serverTime === f.now());
+    c.send({ type: 'move', x: -50, z: -16 });
+    last = await next;
+  }
+  assert.ok(last.self.x > -17, 'diagonal attempts cannot slip through the wall');
+  assert.ok(last.self.z < -12, 'the same input can still slide along the structure');
+  await moveTo(f, c, 0, 3);
+  const reached = await moveTo(f, c, 0, -15);
+  assert.ok(Math.hypot(reached.self.x, reached.self.z + 15) < 0.2, 'centered stairs remain open');
+});
+
+test('SQLite preserves inventory and equipment while ignoring legacy gender fields', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'temple-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   let time = 100000;
@@ -464,6 +608,7 @@ test('SQLite preserves inventory, equipment, and gender; legacy profiles default
   const f = {
     game,
     base: `http://127.0.0.1:${addr.port}`,
+    now: () => time,
     advance: (ms) => {
       time += ms;
     },
@@ -478,15 +623,12 @@ test('SQLite preserves inventory, equipment, and gender; legacy profiles default
   const seated = c.wait((packet) => packet.type === 'state' && packet.self.seatId === seat.id);
   c.send({ type: 'sit', seatId: seat.id });
   await seated;
-  const customized = c.wait((packet) => packet.type === 'state' && packet.self.gender === 'female');
-  c.send({ type: 'join', channelId: 'ch-01', gender: 'female' });
-  await customized;
   const legacy = await session(f.base);
   await game.close();
   const saved = new DatabaseSync(dbPath);
   const row = saved.prepare('SELECT data FROM profiles WHERE id = ?').get(legacy.profile.id);
   const legacyData = JSON.parse(row.data);
-  delete legacyData.gender;
+  legacyData.gender = 'female';
   saved
     .prepare('UPDATE profiles SET data = ? WHERE id = ?')
     .run(JSON.stringify(legacyData), legacy.profile.id);
@@ -498,17 +640,17 @@ test('SQLite preserves inventory, equipment, and gender; legacy profiles default
   assert.equal(again.state.self.id, before.self.id);
   assert.deepEqual(again.state.self.inventory, before.self.inventory);
   assert.deepEqual(again.state.self.equipped, before.self.equipped);
-  assert.equal(again.state.self.gender, 'female');
+  assert.equal('gender' in again.state.self, false);
   assert.equal(again.state.self.seatId, null, 'seat reservations are not restored from SQLite');
   const base = `http://127.0.0.1:${newAddr.port}`;
-  assert.equal((await session(base, c.auth.cookie)).profile.gender, 'female');
+  assert.equal('gender' in (await session(base, c.auth.cookie)).profile, false);
   const restoredLegacy = await session(base, legacy.cookie);
-  assert.equal(restoredLegacy.profile.gender, 'male');
+  assert.equal('gender' in restoredLegacy.profile, false);
   const legacyClient = await client({ base }, 'ch-01', restoredLegacy);
-  assert.equal(legacyClient.state.self.gender, 'male');
+  assert.equal('gender' in legacyClient.state.self, false);
   assert.equal(
-    legacyClient.state.players.find((player) => player.id === c.auth.profile.id).gender,
-    'female',
+    'gender' in legacyClient.state.players.find((player) => player.id === c.auth.profile.id),
+    false,
   );
 });
 

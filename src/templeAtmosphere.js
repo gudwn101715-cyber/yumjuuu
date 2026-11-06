@@ -6,12 +6,12 @@ export function addTempleAtmosphere(THREE, root) {
   const material = (color, options = {}) =>
     new THREE.MeshStandardMaterial({ color, roughness: 0.95, flatShading: true, ...options });
   const M = {
-    granite: material('#8a8e80'),
-    stoneLight: material('#b3b49f'),
+    granite: material('#a8b09a'),
+    stoneLight: material('#d0cfb7'),
     tile: material('#424e48'),
     timber: material('#73513d'),
-    moss: material('#617b4c'),
-    fern: material('#79945e', { side: THREE.DoubleSide }),
+    moss: material('#7b995a'),
+    fern: material('#9db777', { side: THREE.DoubleSide }),
     paper: material('#efcfa0', { emissive: '#c78d4d', emissiveIntensity: 0.11 }),
     brass: material('#9f824c', { metalness: 0.28, roughness: 0.65 }),
   };
@@ -89,7 +89,8 @@ export function addTempleAtmosphere(THREE, root) {
   // The low tiled walls frame the courtyard without hiding a walking character.
   // The open ends align with the trails to the groves and do not close the map.
   for (const side of [-1, 1]) {
-    const x = side * 18;
+    // The west side leaves the shared incense queue unobstructed.
+    const x = side < 0 ? -23 : 18;
     box(1.6, 0.22, 14, M.stoneLight, x, 0.11, 21);
     box(0.95, 1.25, 13.6, M.granite, x, 0.83, 21);
     // Individual irregular stone faces, grouped into two muted granite tones.
@@ -129,6 +130,7 @@ export function addTempleAtmosphere(THREE, root) {
     [-30, -13, 0.9],
     [30, -15, 0.85],
   ]) {
+    if (x > -20 && x < -7 && z > 4 && z < 28) continue;
     stone(x, z, size, x * 0.17);
     fern(x + 1.1 * size, z + 0.3, size * 0.65, z * 0.1);
   }

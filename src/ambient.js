@@ -1,42 +1,43 @@
-// User-initiated, locally generated ambience: no media downloads or autoplay.
-export function createAmbience() {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return null;
-  const ctx = new AudioContext();
-  const master = ctx.createGain();
-  master.gain.value = 0.035;
-  master.connect(ctx.destination);
-  const oscillators = [];
-  [146.83, 220, 293.66].forEach((frequency, index) => {
-    const oscillator = ctx.createOscillator();
-    const gain = ctx.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.value = frequency;
-    gain.gain.value = 0.23 / (index + 1);
-    oscillator.connect(gain);
-    gain.connect(master);
-    oscillator.start();
-    oscillators.push(oscillator);
-  });
-  function bell() {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.frequency.value = [440, 587.33, 659.25, 880][Math.floor(Math.random() * 4)];
-    gain.gain.setValueAtTime(0.5, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 5);
-    osc.connect(gain);
-    gain.connect(master);
-    osc.start();
-    osc.stop(ctx.currentTime + 5);
+/** Licensed Buddhist audio recording; playback starts only after the player's click. */
+export const AMBIENCE_AUDIO_URL = '/audio/buddhist-chant.mp3';
+
+export function createAmbience({ onError } = {}) {
+  if (typeof Audio === 'undefined') return null;
+  const recording = new Audio(AMBIENCE_AUDIO_URL);
+  recording.preload = 'none';
+  recording.loop = true;
+  recording.volume = 0.18;
+  let stopped = false;
+  let reported = false;
+
+  function reportFailure() {
+    if (stopped || reported) return;
+    reported = true;
+    onError?.('배경음을 재생하지 못했어요. 파일 연결과 브라우저의 소리 권한을 확인해 주세요.');
   }
-  bell();
-  const interval = setInterval(bell, 8500);
-  ctx.resume();
+  recording.addEventListener('error', reportFailure);
+
   return {
+    async play() {
+      if (stopped) return false;
+      try {
+        await recording.play();
+        return !stopped && !recording.paused;
+      } catch {
+        reportFailure();
+        return false;
+      }
+    },
+    get playing() {
+      return !stopped && !recording.paused && !recording.ended;
+    },
     stop() {
-      clearInterval(interval);
-      oscillators.forEach((o) => o.stop());
-      ctx.close();
+      if (stopped) return;
+      stopped = true;
+      recording.removeEventListener('error', reportFailure);
+      recording.pause();
+      recording.removeAttribute('src');
+      recording.load();
     },
   };
 }

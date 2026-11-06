@@ -89,3 +89,27 @@ export const SEATS = Object.freeze(
     ).flat();
   }),
 );
+
+/** The shared courtyard censer and the server-owned, first-in-first-out line. */
+export const INCENSE_STATIONS = Object.freeze([
+  Object.freeze({
+    id: 'incense-main',
+    name: '향 공양',
+    x: -9,
+    z: 5,
+    y: 0,
+    entrance: Object.freeze({ x: -5, z: 12 }),
+    duration: 6000,
+  }),
+]);
+
+export function incenseQueuePosition(index, stationId = 'incense-main') {
+  const station = INCENSE_STATIONS.find((entry) => entry.id === stationId);
+  if (!station) return null;
+  const slot = Math.max(0, Math.min(107, Math.trunc(index) || 0));
+  if (slot === 0) return { x: station.x, z: station.z + 1.6 };
+  const waiting = slot - 1;
+  const row = Math.floor(waiting / 8);
+  const column = row % 2 ? 7 - (waiting % 8) : waiting % 8;
+  return { x: station.x - column * 1.4, z: station.z + 3.5 + row * 1.3 };
+}

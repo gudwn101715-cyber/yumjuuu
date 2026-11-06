@@ -19,13 +19,15 @@ import {
   BASE_BOW_DURATION,
   GATHER_REACH,
   computeStats,
+  bowDropChance,
 } from '../shared/game.js';
-import { SEATS } from '../shared/templeLayout.js';
+import { SEATS, INCENSE_STATIONS, incenseQueuePosition } from '../shared/templeLayout.js';
+import { moveWithCollisions } from '../shared/worldCollision.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const seatsById = new Map(SEATS.map((seat) => [seat.id, seat]));
 const SEAT_REACH = 1.8;
-const GENDERS = new Set(['male', 'female']);
+
 const tokenHash = (token) => createHash('sha256').update(token).digest('hex');
 const cleanText = (value, limit) =>
   [
@@ -37,6 +39,10 @@ const cleanText = (value, limit) =>
     .join('');
 const distance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const mimeTypes = {
+  '.txt': 'text/plain; charset=utf-8',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -76,6 +82,12 @@ export function createGameServer(options = {}) {
         halls: HALLS.map((hall) => ({ ...hall, progress: 0, goal: 108, participants: new Map() })),
         nodes: NODES.map((node) => ({ ...node, readyAt: 0 })),
         chat: [],
+        incenseStations: INCENSE_STATIONS.map((station) => ({
+          ...station,
+          queue: [],
+          activePlayerId: null,
+          offeringUntil: 0,
+        })),
       },
     ]),
   );
@@ -83,13 +95,13 @@ export function createGameServer(options = {}) {
   function persist(profile) {
     const data = {
       name: profile.name,
-      gender: profile.gender,
       x: profile.x,
       z: profile.z,
       inventory: profile.inventory,
       equipped: profile.equipped,
       bows: profile.bows,
       collected: profile.collected,
+      incenseOfferings: profile.incenseOfferings || 0,
     };
     saveProfile.run(profile.id, profile.sessionHash, JSON.stringify(data), clock());
     profile.dirty = false;
@@ -102,13 +114,19 @@ export function createGameServer(options = {}) {
       id: randomUUID(),
       sessionHash,
       name: `수행자 ${String(Math.floor(random() * 900) + 100)}`,
-      gender: 'male',
       ...SPAWN,
       inventory: [firstCord, ...firstBeads],
       equipped: { cord: firstCord.id, beads: firstBeads.map((item) => item.id) },
       bows: 0,
       collected: 0,
+      incenseOfferings: 0,
       bowingUntil: 0,
+      bowStartedAt: 0,
+      bowDuration: 0,
+      gassho: false,
+      incenseStationId: null,
+      incenseQueueIndex: null,
+      incenseOfferingUntil: 0,
       bowHallId: null,
       seatId: null,
       moveAt: clock(),
@@ -133,15 +151,24 @@ export function createGameServer(options = {}) {
     const data = JSON.parse(row.data);
     const profile = {
       ...data,
-      gender: GENDERS.has(data.gender) ? data.gender : 'male',
       id: row.id,
       sessionHash: hash,
       bowingUntil: 0,
+      bowStartedAt: 0,
+      bowDuration: 0,
+      gassho: false,
+      incenseStationId: null,
+      incenseQueueIndex: null,
+      incenseOfferingUntil: 0,
       bowHallId: null,
       seatId: null,
       moveAt: clock(),
       dirty: false,
     };
+    delete profile.gender;
+    profile.incenseOfferings = Number.isFinite(profile.incenseOfferings)
+      ? profile.incenseOfferings
+      : 0;
     profile.inventory = profile.inventory.filter((item) => ITEMS[item.defId]);
     profiles.set(profile.id, profile);
     return profile;
@@ -209,7 +236,7 @@ export function createGameServer(options = {}) {
         headers['Set-Cookie'] =
           `temple_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${(options.secureCookie ?? process.env.COOKIE_SECURE === 'true') ? '; Secure' : ''}`;
       }
-      const result = { id: profile.id, name: profile.name, gender: profile.gender };
+      const result = { id: profile.id, name: profile.name };
       if (![...peers].some((peer) => peer.profile.id === profile.id)) profiles.delete(profile.id);
       return json(res, 200, result, headers);
     }
@@ -256,13 +283,47 @@ export function createGameServer(options = {}) {
     for (const peer of room.players.values()) send(peer, packet);
   }
 
+  function clearBow(profile) {
+    profile.bowingUntil = 0;
+    profile.bowStartedAt = 0;
+    profile.bowDuration = 0;
+    profile.bowHallId = null;
+  }
+
+  function syncIncenseQueue(room, station) {
+    station.queue = station.queue.filter((id) => room.players.has(id));
+    station.queue.forEach((id, index) => {
+      const profile = room.players.get(id).profile;
+      profile.incenseStationId = station.id;
+      profile.incenseQueueIndex = index;
+      profile.incenseOfferingUntil = station.activePlayerId === id ? station.offeringUntil : 0;
+    });
+    if (!station.queue.includes(station.activePlayerId)) {
+      station.activePlayerId = null;
+      station.offeringUntil = 0;
+    }
+  }
+
+  function leaveIncense(peer) {
+    if (peer.room) {
+      for (const station of peer.room.incenseStations) {
+        station.queue = station.queue.filter((id) => id !== peer.profile.id);
+        syncIncenseQueue(peer.room, station);
+      }
+    }
+    peer.profile.incenseStationId = null;
+    peer.profile.incenseQueueIndex = null;
+    peer.profile.incenseOfferingUntil = 0;
+  }
+
   function leave(peer) {
     if (!peer.room) return;
     const room = peer.room;
+    leaveIncense(peer);
     if (room.players.get(peer.profile.id) === peer) room.players.delete(peer.profile.id);
     peer.room = null;
-    peer.profile.bowingUntil = 0;
-    peer.profile.bowHallId = null;
+    clearBow(peer.profile);
+    peer.profile.gassho = false;
     peer.profile.seatId = null;
     persist(peer.profile);
   }
@@ -273,10 +334,15 @@ export function createGameServer(options = {}) {
     return {
       id: profile.id,
       name: profile.name,
-      gender: profile.gender,
       x: profile.x,
       z: profile.z,
       bowingUntil: profile.bowingUntil,
+      bowStartedAt: profile.bowStartedAt,
+      bowDuration: profile.bowDuration,
+      gassho: profile.gassho,
+      incenseStationId: profile.incenseStationId,
+      incenseQueueIndex: profile.incenseQueueIndex,
+      incenseOfferingUntil: profile.incenseOfferingUntil,
       seatId: profile.seatId,
       showcase: {
         cord: defId(profile.equipped.cord),
@@ -296,6 +362,7 @@ export function createGameServer(options = {}) {
       stats: computeStats(profile.inventory, profile.equipped),
       bows: profile.bows,
       collected: profile.collected,
+      incenseOfferings: profile.incenseOfferings || 0,
       bowHallId: profile.bowHallId,
     };
     send(peer, {
@@ -313,6 +380,14 @@ export function createGameServer(options = {}) {
         goal,
       })),
       nodes: room.nodes.map(({ id, readyAt }) => ({ id, readyAt })),
+      incenseStations: room.incenseStations.map(
+        ({ queue, activePlayerId, offeringUntil, ...station }) => ({
+          ...station,
+          queue: [...queue],
+          activePlayerId,
+          offeringUntil,
+        }),
+      ),
       serverTime: now,
     });
   }
@@ -320,7 +395,7 @@ export function createGameServer(options = {}) {
   function award(peer, guaranteed = false) {
     const { profile, room } = peer;
     const stats = computeStats(profile.inventory, profile.equipped);
-    if (!guaranteed && random() > Math.min(0.95, 0.65 + stats.dropRate / 250)) return null;
+    if (!guaranteed && random() >= bowDropChance(stats)) return null;
     if (profile.inventory.length >= 500) {
       notice(peer, '소지품이 가득 찼습니다. 현재 보관 한도는 500개입니다.', 'error');
       return null;
@@ -383,14 +458,10 @@ export function createGameServer(options = {}) {
     if (packet.type === 'join') {
       const room = rooms.get(packet.channelId);
       if (!room) return notice(peer, '채널을 찾을 수 없습니다.', 'error');
-      const gender = GENDERS.has(packet.gender) ? packet.gender : peer.profile.gender;
-      if (packet.gender !== undefined && !GENDERS.has(packet.gender))
-        notice(peer, '남성 또는 여성 캐릭터를 선택해 주세요.', 'error', { code: 'INVALID_GENDER' });
       if (room === peer.room) {
         const name = cleanText(packet.name, 16);
-        if ((name && name !== peer.profile.name) || gender !== peer.profile.gender) {
+        if (name && name !== peer.profile.name) {
           if (name) peer.profile.name = name;
-          peer.profile.gender = gender;
           persist(peer.profile);
         }
         return state(peer);
@@ -409,7 +480,6 @@ export function createGameServer(options = {}) {
       activeSessions.set(peer.profile.id, peer);
       const name = cleanText(packet.name, 16);
       if (name) peer.profile.name = name;
-      peer.profile.gender = gender;
       peer.profile.x = SPAWN.x;
       peer.profile.z = SPAWN.z;
       peer.profile.moveAt = now;
@@ -425,6 +495,7 @@ export function createGameServer(options = {}) {
     if (!peer.room) return notice(peer, '먼저 채널에 입장해 주세요.', 'error');
     const { profile, room } = peer;
     if (packet.type === 'move') {
+      if (profile.incenseOfferingUntil > now) return;
       if (!Number.isFinite(packet.x) || !Number.isFinite(packet.z)) return;
       const x = Math.max(WORLD.minX, Math.min(WORLD.maxX, packet.x));
       const z = Math.max(WORLD.minZ, Math.min(WORLD.maxZ, packet.z));
@@ -439,10 +510,14 @@ export function createGameServer(options = {}) {
       profile.moveAt = now;
       if (length > 0.01 && maxMove > 0) {
         const ratio = Math.min(1, maxMove / length);
-        profile.x += dx * ratio;
-        profile.z += dz * ratio;
-        profile.bowingUntil = 0;
-        profile.bowHallId = null;
+        const next = moveWithCollisions(profile, {
+          x: profile.x + dx * ratio,
+          z: profile.z + dz * ratio,
+        });
+        profile.x = next.x;
+        profile.z = next.z;
+        clearBow(profile);
+        profile.gassho = false;
         profile.seatId = null;
         profile.dirty = true;
       }
@@ -461,28 +536,63 @@ export function createGameServer(options = {}) {
         return notice(peer, '다른 도반이 앉아 있는 방석입니다.', 'error', {
           code: 'SEAT_OCCUPIED',
         });
+      leaveIncense(peer);
+      profile.gassho = false;
       profile.x = seat.x;
       profile.z = seat.z;
       profile.moveAt = now;
       profile.seatId = seat.id;
-      profile.bowingUntil = 0;
-      profile.bowHallId = null;
+      clearBow(profile);
       profile.dirty = true;
       state(peer);
     } else if (packet.type === 'stand') {
       profile.seatId = null;
-      profile.bowingUntil = 0;
-      profile.bowHallId = null;
+      clearBow(profile);
+      state(peer);
+    } else if (packet.type === 'gassho') {
+      if (profile.bowingUntil > now || profile.incenseStationId) return;
+      profile.gassho = !profile.gassho;
       state(peer);
     } else if (packet.type === 'bow') {
       if (profile.bowingUntil > now) return;
-      const hall = room.halls.find((entry) => entry.id === packet.hallId);
-      if (!hall || distance(profile, hall) > hall.radius)
-        return notice(peer, '법당 가까이에서 절할 수 있습니다.', 'error');
-      profile.bowingUntil =
-        now +
+      const seat = seatsById.get(profile.seatId);
+      if (!seat || distance(profile, seat) > 0.3)
+        return notice(peer, '방석 위에 자리를 잡은 뒤 절할 수 있습니다.', 'error', {
+          code: 'SEAT_REQUIRED',
+        });
+      const hall = room.halls.find((entry) => entry.id === seat.hallId);
+      if (!hall || (packet.hallId && packet.hallId !== hall.id))
+        return notice(peer, '이 방석의 법당을 향해 절해 주세요.', 'error', {
+          code: 'SEAT_REQUIRED',
+        });
+      profile.gassho = false;
+      profile.bowStartedAt = now;
+      profile.bowDuration =
         BASE_BOW_DURATION / (1 + computeStats(profile.inventory, profile.equipped).bowSpeed / 100);
+      profile.bowingUntil = now + profile.bowDuration;
       profile.bowHallId = hall.id;
+      state(peer);
+    } else if (packet.type === 'queueIncense') {
+      const station = room.incenseStations.find((entry) => entry.id === packet.stationId);
+      if (!station)
+        return notice(peer, '향로를 찾을 수 없습니다.', 'error', { code: 'INCENSE_UNKNOWN' });
+      if (profile.incenseStationId === station.id) return state(peer);
+      if (distance(profile, station.entrance) > 2)
+        return notice(peer, '향 공양 대기줄 입구로 다가가 주세요.', 'error', {
+          code: 'INCENSE_TOO_FAR',
+        });
+      if (station.queue.length >= capacity)
+        return notice(peer, '향 공양 대기줄이 가득 찼습니다.', 'error', { code: 'INCENSE_FULL' });
+      leaveIncense(peer);
+      clearBow(profile);
+      profile.gassho = false;
+      profile.seatId = null;
+      station.queue.push(profile.id);
+      syncIncenseQueue(room, station);
+      notice(peer, '향 공양 대기줄에 섰습니다. 차례가 되면 향을 올립니다.');
+      state(peer);
+    } else if (packet.type === 'leaveIncense') {
+      leaveIncense(peer);
       state(peer);
     } else if (packet.type === 'gather') {
       const node = room.nodes.find((entry) => entry.id === packet.nodeId);
@@ -598,9 +708,9 @@ export function createGameServer(options = {}) {
         const profile = peer.profile;
         if (profile.bowingUntil && profile.bowingUntil <= now) {
           const hall = room.halls.find((entry) => entry.id === profile.bowHallId);
-          profile.bowingUntil = 0;
-          profile.bowHallId = null;
-          if (hall && distance(profile, hall) <= hall.radius) {
+          const seat = seatsById.get(profile.seatId);
+          clearBow(profile);
+          if (hall && seat?.hallId === hall.id && distance(profile, seat) <= 0.3) {
             profile.bows++;
             profile.dirty = true;
             hall.progress++;
@@ -626,6 +736,28 @@ export function createGameServer(options = {}) {
               hall.participants.clear();
             }
             persist(profile);
+          }
+        }
+      }
+      for (const station of room.incenseStations) {
+        syncIncenseQueue(room, station);
+        const first = room.players.get(station.queue[0]);
+        if (!first) continue;
+        if (station.activePlayerId && station.offeringUntil <= now) {
+          first.profile.incenseOfferings = (first.profile.incenseOfferings || 0) + 1;
+          first.profile.dirty = true;
+          notice(first, '향 공양을 마쳤습니다. 맑은 향이 산사에 머뭅니다.', 'incense-complete');
+          leaveIncense(first);
+          persist(first.profile);
+        } else if (!station.activePlayerId) {
+          const front = incenseQueuePosition(0, station.id);
+          if (distance(first.profile, front) <= 1.4) {
+            first.profile.x = front.x;
+            first.profile.z = front.z;
+            first.profile.moveAt = now;
+            station.activePlayerId = first.profile.id;
+            station.offeringUntil = now + station.duration;
+            first.profile.incenseOfferingUntil = station.offeringUntil;
           }
         }
       }

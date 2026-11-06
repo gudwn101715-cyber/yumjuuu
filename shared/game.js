@@ -2,7 +2,12 @@ export const WORLD = Object.freeze({ minX: -76, maxX: 76, minZ: -76, maxZ: 64 })
 export const CHANNEL_CAPACITY = 108;
 export const SPAWN = Object.freeze({ x: 0, z: 20 });
 export const BASE_MOVE_SPEED = 4.2;
-export const BASE_BOW_DURATION = 3000;
+export const BASE_BOW_DURATION = 4200;
+
+export function bowDropChance(stats = {}) {
+  const bonus = Number.isFinite(stats.dropRate) ? Math.max(0, stats.dropRate) : 0;
+  return Math.min(0.2, 0.08 + bonus * 0.0012);
+}
 export const GATHER_REACH = 6.5;
 export const RARITIES = Object.freeze({
   common: { label: '일반', color: '#909b88', weight: 54 },

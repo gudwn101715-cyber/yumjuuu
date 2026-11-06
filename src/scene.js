@@ -3,27 +3,33 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { HALLS, NODES, WORLD, BASE_MOVE_SPEED } from '../shared/game.js';
-import { HALL_LAYOUTS, SEATS } from '../shared/templeLayout.js';
+import {
+  HALL_LAYOUTS,
+  SEATS,
+  INCENSE_STATIONS,
+  incenseQueuePosition,
+} from '../shared/templeLayout.js';
 import { createThirdPersonCamera } from './thirdPersonCamera.js';
 import { createWorldMaterials } from './world/materials.js';
 import { buildNaturalEnvironment } from './world/environment.js';
 import { buildTempleArchitecture } from './world/templeArchitecture.js';
 import { createPilgrimAvatar } from './world/avatar.js';
+import { moveWithCollisions, findWalkPath } from '../shared/worldCollision.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const ease = (a, b, t) => a + (b - a) * t;
 const tempV = new THREE.Vector3();
 const seatsById = new Map(SEATS.map((seat) => [seat.id, seat]));
-const SEATED_LIFT = 0.225 - 0.025 - 0.0225;
+const SEATED_LIFT = 0.225 - 0.025 - 0.006;
 
-/** Human-height third-person renderer; gameplay state remains server authoritative. */
+/** Shoulder-level game camera; gameplay state remains server authoritative. */
 export function createScene(
   container,
   { onMove, onInteract, onInspect, onReady, quality = 'auto' } = {},
 ) {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#b4c0b8');
-  scene.fog = new THREE.FogExp2('#b4c0b8', 0.0038);
+  scene.background = new THREE.Color('#9dd4f0');
+  scene.fog = new THREE.FogExp2('#c3e5f3', 0.0011);
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
@@ -44,12 +50,12 @@ export function createScene(
   renderer.shadowMap.autoUpdate = false;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.AgXToneMapping;
-  renderer.toneMappingExposure = 0.94;
+  renderer.toneMappingExposure = 1.05;
   renderer.domElement.style.cssText =
     'display:block;width:100%;height:100%;outline:none;touch-action:none;';
   renderer.domElement.setAttribute(
     'aria-label',
-    '산사 3인칭 시점. WASD로 이동, Shift로 빠르게 걷기, 마우스 오른쪽 드래그로 둘러보기, E키로 상호작용하세요.',
+    '산사 게임 화면. WASD로 이동, 빈 화면을 누른 채 드래그해서 둘러보기, Space로 방석에 가서 절, G로 합장, E로 상호작용하세요.',
   );
   renderer.domElement.tabIndex = 0;
   container.appendChild(renderer.domElement);
@@ -65,16 +71,16 @@ export function createScene(
   const sky = new Sky();
   sky.scale.setScalar(10000);
   const skyUniforms = sky.material.uniforms;
-  skyUniforms.turbidity.value = 5.5;
-  skyUniforms.rayleigh.value = 1.8;
-  skyUniforms.mieCoefficient.value = 0.004;
+  skyUniforms.turbidity.value = 2;
+  skyUniforms.rayleigh.value = 1.2;
+  skyUniforms.mieCoefficient.value = 0.002;
   skyUniforms.mieDirectionalG.value = 0.82;
-  skyUniforms.sunPosition.value.set(-0.58, 0.48, 0.52).normalize();
+  skyUniforms.sunPosition.value.set(-0.48, 0.75, 0.4).normalize();
   scene.add(sky);
-  const ambient = new THREE.HemisphereLight('#d8e3e8', '#444b35', 0.85);
+  const ambient = new THREE.HemisphereLight('#deefff', '#7b9060', 1.1);
   scene.add(ambient);
-  const sunOffset = new THREE.Vector3(-28, 34, 18);
-  const sunlight = new THREE.DirectionalLight('#ffe4b5', 3.8);
+  const sunOffset = new THREE.Vector3(-24, 42, 22);
+  const sunlight = new THREE.DirectionalLight('#fff1d1', 3.4);
   sunlight.position.copy(sunOffset);
   sunlight.castShadow = true;
   sunlight.shadow.mapSize.set(2048, 2048);
@@ -169,6 +175,17 @@ export function createScene(
     scene.add(instrument);
     pickTargets.push(instrument);
   }
+  for (const station of INCENSE_STATIONS) {
+    const pick = new THREE.Mesh(
+      new THREE.CylinderGeometry(1, 1, 2.2, 12),
+      new THREE.MeshBasicMaterial(),
+    );
+    pick.position.set(station.x, station.y + 1.1, station.z);
+    pick.layers.set(1);
+    pick.userData = { kind: 'incense', id: station.id };
+    scene.add(pick);
+    pickTargets.push(pick);
+  }
   const localMallet = new THREE.Group();
   const malletWood = new THREE.MeshStandardMaterial({ color: '#ba8a51', roughness: 0.72 });
   const malletHandle = new THREE.Mesh(
@@ -235,6 +252,7 @@ export function createScene(
     mesh.receiveShadow = true;
     staticRoot.add(mesh);
   }
+  if (environment.effects) scene.add(environment.effects);
   let shadowAt = 0;
   let slowFrames = 0;
   function applyQuality(mode, automaticLevel) {
@@ -295,6 +313,9 @@ export function createScene(
     transparent: true,
     opacity: 0.48,
     depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
   });
   for (const [index, hall] of HALLS.entries()) {
     const layout = HALL_LAYOUTS[hall.id];
@@ -303,7 +324,7 @@ export function createScene(
       buildingContact,
     );
     contact.rotation.x = -Math.PI / 2;
-    contact.position.set(layout.x, 0.023, layout.z);
+    contact.position.set(layout.x, 0.035, layout.z);
     scene.add(contact);
   }
 
@@ -322,6 +343,9 @@ export function createScene(
     opacity: 0.55,
     side: THREE.DoubleSide,
     depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
   NODES.forEach((node, i) => {
     const group = new THREE.Group();
@@ -333,7 +357,7 @@ export function createScene(
     group.add(orb);
     const ring = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.012, 5, 32), ringMaterial.clone());
     ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.025;
+    ring.position.y = 0.065;
     group.add(ring);
     const spark = new THREE.Mesh(
       new THREE.OctahedronGeometry(0.035),
@@ -390,17 +414,26 @@ export function createScene(
   const avatars = new Map();
   const avatarLODGeometries = new Map();
   const avatarLODMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 });
-  function remoteSilhouette(rig, seed, gender) {
-    const key = `${gender}:${Math.abs(seed) % 5}`;
+  function remoteSilhouette(rig, seed, pose = 'standing') {
+    const key = `${Math.abs(seed) % 5}:${pose}`;
     if (!avatarLODGeometries.has(key)) {
       const pieces = [];
+      for (let step = 0; step < 18; step++)
+        rig.animate({
+          delta: 0.1,
+          sitting: pose === 'sitting',
+          gassho: pose === 'gassho',
+          bowing: pose === 'bowing',
+          progress: pose === 'bowing' ? 0.55 : 0,
+        });
       rig.group.updateMatrixWorld(true);
+      const inverseRig = new THREE.Matrix4().copy(rig.group.matrixWorld).invert();
       rig.group.traverse((object) => {
         if (!object.isMesh) return;
         const geometry = object.geometry.index
           ? object.geometry.toNonIndexed()
           : object.geometry.clone();
-        geometry.applyMatrix4(object.matrixWorld);
+        geometry.applyMatrix4(new THREE.Matrix4().multiplyMatrices(inverseRig, object.matrixWorld));
         geometry.deleteAttribute('uv');
         const color = object.material.color || new THREE.Color('#7d8272');
         const colors = new Float32Array(geometry.attributes.position.count * 3);
@@ -423,10 +456,13 @@ export function createScene(
     transparent: true,
     opacity: 0.6,
     depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
-  const shadowGeometry = new THREE.CircleGeometry(0.48, 24);
+  const shadowGeometry = new THREE.CircleGeometry(0.36, 24);
   const selfMarker = new THREE.Mesh(
-    new THREE.RingGeometry(0.35, 0.37, 32),
+    new THREE.RingGeometry(0.29, 0.31, 32),
     new THREE.MeshBasicMaterial({
       color: '#f8efd5',
       side: THREE.DoubleSide,
@@ -457,10 +493,18 @@ export function createScene(
     serverOffset = 0;
   let destination = null,
     pendingInteraction = null,
-    lastMoveAt = 0,
-    lastInteractionAt = 0;
+    lastMoveAt = 0;
+  let route = [];
+  let lastInteraction = { key: '', at: 0 };
   let pendingSeatStrike = null;
   let pendingSeatStrikeUntil = 0;
+  let pendingBowSeat = null;
+  let pendingBowUntil = 0;
+  let activeQueueStation = null;
+  let queueTargetIndex = null;
+  let canceledQueueStation = null;
+  let interactionTimer = null;
+  let tripId = 0;
   let walkingNow = false;
   let lastFrame = performance.now(),
     elapsed = 0,
@@ -480,17 +524,16 @@ export function createScene(
 
   const addAvatar = (player, isSelf) => {
     const seed = [...player.id].reduce((n, c) => n + c.charCodeAt(0), 0);
-    const gender = player.gender === 'female' ? 'female' : 'male';
-    const rig = createPilgrimAvatar({ THREE, isSelf, seed, gender });
-    const lod = isSelf ? null : remoteSilhouette(rig, seed, gender);
+    const rig = createPilgrimAvatar({ THREE, isSelf, seed });
+    const lod = isSelf ? null : remoteSilhouette(rig, seed);
     const group = new THREE.Group(),
       pivot = new THREE.Group();
     group.add(pivot);
     const pick = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.38, 0.38, 1.65, 8),
+      new THREE.CylinderGeometry(0.36, 0.36, 1.2, 8),
       new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
     );
-    pick.position.y = 0.825;
+    pick.position.y = 0.6;
     pick.layers.set(1);
     pick.userData = { kind: 'player', id: player.id };
     group.add(pick);
@@ -516,7 +559,6 @@ export function createScene(
       pivot,
       rig,
       lod,
-      gender,
       label,
       player,
       isSelf,
@@ -540,9 +582,88 @@ export function createScene(
     onMove?.(clamp(x, WORLD.minX, WORLD.maxX), clamp(z, WORLD.minZ, WORLD.maxZ));
   };
   const interact = (action) => {
-    if (performance.now() - lastInteractionAt < 500) return;
-    lastInteractionAt = performance.now();
+    const now = performance.now();
+    const key = `${action.type}:${action.seatId || action.hallId || action.stationId || action.nodeId || ''}`;
+    if (key === lastInteraction.key && now - lastInteraction.at < 300) return false;
+    lastInteraction = { key, at: now };
     onInteract?.(action);
+    return true;
+  };
+  const hint = (message) => onInteract?.({ type: 'hint', message });
+  const cancelAutowalk = ({ leaveQueue = true } = {}) => {
+    tripId++;
+    clearTimeout(interactionTimer);
+    interactionTimer = null;
+    destination = null;
+    route = [];
+    pendingInteraction = null;
+    pendingSeatStrike = null;
+    pendingBowSeat = null;
+    destinationMarker.visible = false;
+    queueTargetIndex = null;
+    if (leaveQueue && (activeQueueStation || snapshot?.self?.incenseStationId)) {
+      canceledQueueStation = activeQueueStation || snapshot.self.incenseStationId;
+      activeQueueStation = null;
+      interact({ type: 'leaveIncense' });
+    }
+  };
+  const travelTo = (position, action = null) => {
+    tripId++;
+    clearTimeout(interactionTimer);
+    route = findWalkPath(localPosition, position);
+    destination = route.shift() || null;
+    pendingInteraction = action;
+    if (!destination) {
+      pendingInteraction = null;
+      pendingBowSeat = null;
+      hint('지나갈 수 있는 길을 찾지 못했습니다. 조금 이동한 뒤 다시 눌러 주세요.');
+      return false;
+    }
+    destinationMarker.position.set(
+      position.x,
+      architecture.heightAt(position.x, position.z) + 0.08,
+      position.z,
+    );
+    destinationMarker.visible = !activeQueueStation;
+    return true;
+  };
+  const requestBow = (hallId) => {
+    const self = snapshot?.self;
+    if (!self || self.bowingUntil > Date.now() + serverOffset) return false;
+    cancelAutowalk();
+    if (self.seatId) {
+      const seat = seatsById.get(self.seatId);
+      if (seat && (!hallId || seat.hallId === hallId)) {
+        return interact({ type: 'bow', hallId: seat.hallId });
+      }
+    }
+    const occupied = new Set(
+      (snapshot.players || [])
+        .filter((player) => player.id !== self.id)
+        .map((player) => player.seatId),
+    );
+    const seat = SEATS.filter(
+      (candidate) => !occupied.has(candidate.id) && (!hallId || candidate.hallId === hallId),
+    ).sort(
+      (a, b) => Math.hypot(a.x - self.x, a.z - self.z) - Math.hypot(b.x - self.x, b.z - self.z),
+    )[0];
+    if (!seat) {
+      hint('법당의 방석이 모두 사용 중입니다. 잠시 뒤 다시 시도해 주세요.');
+      return false;
+    }
+    pendingBowSeat = seat.id;
+    pendingBowUntil = Date.now() + 90000;
+    travelTo(seat, { type: 'sit', seatId: seat.id });
+    return true;
+  };
+  const queueIncense = (stationId = INCENSE_STATIONS[0]?.id) => {
+    if (!snapshot?.self) return false;
+    if (snapshot.self.incenseStationId) return true;
+    const station = INCENSE_STATIONS.find((candidate) => candidate.id === stationId);
+    if (!station) return false;
+    cancelAutowalk();
+    travelTo(station.entrance, { type: 'queueIncense', stationId: station.id });
+    return true;
   };
   const strikeMoktak = () => {
     const self = snapshot?.self;
@@ -560,33 +681,36 @@ export function createScene(
   };
   const approach = (kind, id) => {
     if (!snapshot?.self) return;
+    if (kind === 'hall') return requestBow(id);
+    if (kind === 'incense') return queueIncense(id);
     const isSeat = kind === 'seat' || kind === 'moktak';
-    const obj = isSeat
-      ? seatsById.get(id)
-      : kind === 'hall'
-        ? HALLS.find((h) => h.id === id)
-        : NODES.find((n) => n.id === id);
+    const obj = isSeat ? seatsById.get(id) : NODES.find((n) => n.id === id);
     if (!obj) return;
     if (kind === 'moktak' && snapshot.self.seatId === id) {
       strikeMoktak();
       return;
     }
+    cancelAutowalk();
     const x = obj.x,
-      z = isSeat ? obj.z : kind === 'hall' ? obj.z + 8 : obj.z + 2;
-    destination = { x, z };
-    pendingInteraction = isSeat
-      ? { type: 'sit', seatId: id }
-      : kind === 'hall'
-        ? { type: 'bow', hallId: id }
-        : { type: 'gather', nodeId: id };
+      z = isSeat ? obj.z : obj.z + 2;
+    travelTo({ x, z }, isSeat ? { type: 'sit', seatId: id } : { type: 'gather', nodeId: id });
     pendingSeatStrike = kind === 'moktak' ? id : null;
     pendingSeatStrikeUntil = Date.now() + 20000;
-    destinationMarker.position.set(x, 0.15, z);
-    destinationMarker.visible = true;
   };
   const nearestInteraction = () => {
     if (!snapshot?.self) return;
     const p = snapshot.self;
+    if (p.seatId) {
+      requestBow();
+      return;
+    }
+    const incense = INCENSE_STATIONS.find(
+      (station) => Math.hypot(station.x - p.x, station.z - p.z) < 5,
+    );
+    if (incense) {
+      queueIncense(incense.id);
+      return;
+    }
     if (!p.seatId) {
       const nearby = SEATS.filter((seat) => Math.hypot(seat.x - p.x, seat.z - p.z) <= 1.8).sort(
         (a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z),
@@ -598,7 +722,7 @@ export function createScene(
     }
     const h = HALLS.find((hall) => Math.hypot(hall.x - p.x, hall.z - p.z) <= hall.radius);
     if (h) {
-      interact({ type: 'bow', hallId: h.id });
+      requestBow(h.id);
       return;
     }
     const n = NODES.filter((node) => Math.hypot(node.x - p.x, node.z - p.z) <= 6.5).sort(
@@ -632,6 +756,7 @@ export function createScene(
         'arrowright',
         'e',
         'f',
+        'g',
         ' ',
       ].includes(key)
     )
@@ -641,13 +766,9 @@ export function createScene(
       onInteract?.({ type: 'prime-audio' });
       strikeMoktak();
     }
+    if (key === 'g' && !event.repeat) interact({ type: 'gassho' });
     if (key === ' ' && !event.repeat) {
-      const h =
-        snapshot?.self &&
-        HALLS.find(
-          (hall) => Math.hypot(hall.x - snapshot.self.x, hall.z - snapshot.self.z) <= hall.radius,
-        );
-      if (h) interact({ type: 'bow', hallId: h.id });
+      requestBow();
     }
     keys.add(key);
   };
@@ -690,13 +811,16 @@ export function createScene(
     if (!pointerStart || event.button !== 0) return;
     pointerStart = null;
     touchOrigin = null;
-    if (orbitHandled || dragDistance > 12 || !snapshot?.self) return;
+    if (orbitHandled || dragDistance > 4 || !snapshot?.self) return;
     const point = groundPoint(event);
     const hits = raycaster.intersectObjects(pickTargets, false);
     if (hits.length) {
       const selected =
         hits.find(
-          (hit) => hit.object.userData.kind === 'moktak' || hit.object.userData.kind === 'seat',
+          (hit) =>
+            hit.object.userData.kind === 'moktak' ||
+            hit.object.userData.kind === 'seat' ||
+            hit.object.userData.kind === 'incense',
         ) || hits[0];
       const { kind, id } = selected.object.userData;
       if (kind === 'player') {
@@ -708,14 +832,11 @@ export function createScene(
       return;
     }
     if (!point) return;
-    destination = {
+    cancelAutowalk();
+    travelTo({
       x: clamp(point.x, WORLD.minX + 1, WORLD.maxX - 1),
       z: clamp(point.z, WORLD.minZ + 1, WORLD.maxZ - 1),
-    };
-    pendingInteraction = null;
-    pendingSeatStrike = null;
-    destinationMarker.position.set(destination.x, 0.15, destination.z);
-    destinationMarker.visible = true;
+    });
     renderer.domElement.focus({ preventScroll: true });
   };
   const wheel = (event) => {
@@ -747,19 +868,6 @@ export function createScene(
     if (visible)
       el.style.transform = `translate(-50%,-50%) translate(${(v.x * 0.5 + 0.5) * viewportWidth}px,${(-v.y * 0.5 + 0.5) * viewportHeight + offset}px)`;
   };
-  const themeColors = {
-    bamboo: ['#d4e4e0', '#9bad7d', '#87b9ac'],
-    lotus: ['#e7ddd7', '#b5bf8b', '#a1c9c2'],
-    pine: ['#d5e1dc', '#9fb384', '#8dbbb1'],
-    moon: ['#8999ac', '#8d9e95', '#96b5c0'],
-    dawn: ['#ecd0b1', '#b4b184', '#a5c5b2'],
-    snow: ['#e6edef', '#d9ded1', '#b0ced0'],
-    autumn: ['#f0e4cf', '#c2b17b', '#a7bfb0'],
-    mist: ['#dce7df', '#a8b8a0', '#a3c9c1'],
-    mountain: ['#dfe7d7', '#9db083', '#91bbb0'],
-    sacred: ['#eee6d2', '#b4bb8b', '#acc9b5'],
-  };
-
   function tickMovement(stepDelta) {
     if (!snapshot?.self || disposed) return;
     {
@@ -783,36 +891,67 @@ export function createScene(
         ({ x: dx, z: dz } = view.movement(strafe, forward));
       }
       if (dx || dz) {
+        if (
+          destination ||
+          interactionTimer ||
+          pendingSeatStrike ||
+          pendingBowSeat ||
+          activeQueueStation ||
+          self.incenseStationId
+        )
+          cancelAutowalk();
+      }
+      const offering = self.incenseOfferingUntil > serverNow && activeQueueStation;
+      if (offering) {
         destination = null;
+        route = [];
         pendingInteraction = null;
         destinationMarker.visible = false;
-        pendingSeatStrike = null;
+        dx = dz = 0;
       }
-      if (destination && !bowing) {
+      if (destination && !bowing && !offering) {
         const dist = Math.hypot(destination.x - localPosition.x, destination.z - localPosition.z);
-        if (dist < 1.1) {
-          destination = null;
-          destinationMarker.visible = false;
-          if (pendingInteraction) {
+        if (dist < 0.18) {
+          destination = route.shift() || null;
+          destinationMarker.visible = Boolean(destination) && !activeQueueStation;
+          if (!destination && pendingInteraction) {
             const interaction = pendingInteraction;
             pendingInteraction = null;
             // Wait for the server to acknowledge the final position before checking reach.
-            setTimeout(() => {
-              if (!disposed) interact(interaction);
+            const thisTrip = tripId;
+            interactionTimer = setTimeout(() => {
+              interactionTimer = null;
+              if (!disposed && tripId === thisTrip) interact(interaction);
             }, 180);
           }
-        } else {
-          dx = (destination.x - localPosition.x) / dist;
-          dz = (destination.z - localPosition.z) / dist;
+        }
+        if (destination) {
+          const nextDistance = Math.hypot(
+            destination.x - localPosition.x,
+            destination.z - localPosition.z,
+          );
+          dx = (destination.x - localPosition.x) / Math.max(0.001, nextDistance);
+          dz = (destination.z - localPosition.z) / Math.max(0.001, nextDistance);
         }
       }
-      walkingNow = Boolean((dx || dz) && !bowing);
+      walkingNow = Boolean((dx || dz) && !bowing && !offering);
       if (walkingNow) {
         const length = Math.hypot(dx, dz);
         dx /= length;
         dz /= length;
-        localPosition.x = clamp(localPosition.x + dx * speed * stepDelta, WORLD.minX, WORLD.maxX);
-        localPosition.z = clamp(localPosition.z + dz * speed * stepDelta, WORLD.minZ, WORLD.maxZ);
+        const travelDistance = destination
+          ? Math.min(
+              speed * stepDelta,
+              Math.hypot(destination.x - localPosition.x, destination.z - localPosition.z),
+            )
+          : speed * stepDelta;
+        const next = moveWithCollisions(localPosition, {
+          x: clamp(localPosition.x + dx * travelDistance, WORLD.minX, WORLD.maxX),
+          z: clamp(localPosition.z + dz * travelDistance, WORLD.minZ, WORLD.maxZ),
+        });
+        walkingNow = Math.hypot(next.x - localPosition.x, next.z - localPosition.z) > 0.0001;
+        localPosition.x = next.x;
+        localPosition.z = next.z;
         emitMove(localPosition.x, localPosition.z);
       } else if (!destination) {
         // Reconcile gently after packet loss, a rejected move, or a channel change.
@@ -883,12 +1022,21 @@ export function createScene(
         diff = Math.atan2(Math.sin(diff), Math.cos(diff));
         avatar.group.rotation.y += diff * Math.min(1, delta * 12);
         const isBowing = player.bowingUntil > serverNow;
-        if (isBowing || seated) avatar.angle = Math.PI;
+        const offering = player.incenseOfferingUntil > serverNow;
+        const gassho = Boolean(player.gassho);
+        if (isBowing || seated || offering) avatar.angle = Math.PI;
         const detailed =
           avatar.isSelf ||
           (detailedPeers.has(player.id) && pos.distanceToSquared(localPosition) < 24 * 24);
         avatar.rig.group.visible = detailed;
-        if (avatar.lod) avatar.lod.visible = !detailed;
+        if (avatar.lod) {
+          avatar.lod.visible = !detailed;
+          const pose = isBowing ? 'bowing' : seated ? 'sitting' : gassho ? 'gassho' : 'standing';
+          if (!detailed && avatar.lodPose !== pose) {
+            avatar.lod.geometry = remoteSilhouette(avatar.rig, avatar.seed, pose).geometry;
+            avatar.lodPose = pose;
+          }
+        }
         if (detailed)
           avatar.rig.animate({
             time: elapsed,
@@ -897,17 +1045,19 @@ export function createScene(
             speed: distanceMoved / Math.max(delta, 0.001),
             bowing: isBowing,
             sitting: seated,
+            gassho,
+            incenseOffering: offering,
+            progress: isBowing
+              ? clamp((serverNow - player.bowStartedAt) / Math.max(1, player.bowDuration), 0, 1)
+              : 0,
           });
-        const nextLabel = `${avatar.isSelf ? '나 · ' : ''}${player.name || '수행자'}${isBowing ? ' 🙏' : ''}`;
+        const nextLabel = `${avatar.isSelf ? '나 · ' : ''}${player.name || '수행자'}${gassho ? ' · 합장' : isBowing ? ' · 절' : offering ? ' · 향 공양' : ''}`;
         if (avatar.label.textContent !== nextLabel) avatar.label.textContent = nextLabel;
         // The local character is already identified by the HUD. Keep the forward
         // sightline clear rather than placing a name over the altar.
         if (avatar.isSelf) avatar.label.style.display = 'none';
         else
-          projectLabel(
-            avatar.label,
-            pos.clone().add(new THREE.Vector3(0, seated ? 1.45 : 1.85, 0)),
-          );
+          projectLabel(avatar.label, pos.clone().add(new THREE.Vector3(0, seated ? 1.0 : 1.35, 0)));
       }
     }
     if (!snapshot?.self) view.update(localPosition, delta);
@@ -958,6 +1108,9 @@ export function createScene(
       applyQuality(mode);
     },
     strikeMoktak,
+    requestBow,
+    queueIncense,
+    cancelAutowalk,
     focusSeat(id) {
       approach('seat', id);
     },
@@ -965,7 +1118,9 @@ export function createScene(
       if (!state?.self) return;
       const previousId = snapshot?.self?.id,
         previousChannel = snapshot?.channel?.id,
-        previousSeat = snapshot?.self?.seatId;
+        previousSeat = snapshot?.self?.seatId,
+        previousStation = snapshot?.self?.incenseStationId,
+        previousOfferings = snapshot?.self?.incenseOfferings || 0;
       snapshot = state;
       serverOffset = (state.serverTime || Date.now()) - Date.now();
       if (
@@ -979,10 +1134,9 @@ export function createScene(
           architecture.heightAt(state.self.x, state.self.z) + 0.025,
           state.self.z,
         );
-        destination = null;
-        pendingInteraction = null;
-        pendingSeatStrike = null;
-        destinationMarker.visible = false;
+        cancelAutowalk({ leaveQueue: false });
+        activeQueueStation = null;
+        canceledQueueStation = null;
         view.reset(localPosition);
       }
       if (state.self.seatId && state.self.seatId !== previousSeat) {
@@ -991,17 +1145,15 @@ export function createScene(
           localPosition.set(seat.x, seat.y + 0.025 + SEATED_LIFT, seat.z);
           walkingNow = false;
           destination = null;
+          route = [];
           pendingInteraction = null;
           destinationMarker.visible = false;
         }
       }
       const players = [state.self, ...(state.players || []).filter((p) => p.id !== state.self.id)],
         current = new Set(players.map((p) => p.id));
-      const incomingGender = new Map(
-        players.map((player) => [player.id, player.gender === 'female' ? 'female' : 'male']),
-      );
       for (const [id, avatar] of avatars)
-        if (!current.has(id) || incomingGender.get(id) !== avatar.gender) {
+        if (!current.has(id)) {
           const picks = avatar.group.children.filter((child) => child.userData?.kind === 'player');
           for (const pick of picks) {
             const index = pickTargets.indexOf(pick);
@@ -1031,28 +1183,54 @@ export function createScene(
         pendingSeatStrike = null;
         strikeMoktak();
       }
+      if (pendingBowSeat && Date.now() > pendingBowUntil) {
+        pendingBowSeat = null;
+        hint('방석으로 이동이 멈췄습니다. 절하기를 다시 눌러 주세요.');
+      }
+      if (pendingBowSeat && state.self.seatId === pendingBowSeat) {
+        const seat = seatsById.get(pendingBowSeat);
+        pendingBowSeat = null;
+        if (seat) interact({ type: 'bow', hallId: seat.hallId });
+      } else if (
+        pendingBowSeat &&
+        players.some((player) => player.id !== state.self.id && player.seatId === pendingBowSeat)
+      ) {
+        requestBow(seatsById.get(pendingBowSeat)?.hallId);
+      }
+      if (state.self.incenseStationId) {
+        if (canceledQueueStation !== state.self.incenseStationId) {
+          activeQueueStation = state.self.incenseStationId;
+          const index = state.self.incenseQueueIndex;
+          if (index !== queueTargetIndex || !previousStation) {
+            queueTargetIndex = index;
+            const target = incenseQueuePosition(index, activeQueueStation);
+            if (target) travelTo(target);
+          }
+        }
+      } else {
+        const finishedStation = INCENSE_STATIONS.find((entry) => entry.id === previousStation);
+        if (activeQueueStation) cancelAutowalk({ leaveQueue: false });
+        activeQueueStation = null;
+        canceledQueueStation = null;
+        if (finishedStation && state.self.incenseOfferings > previousOfferings) {
+          travelTo({ x: finishedStation.x + 2.5, z: finishedStation.z + 1.8 });
+        }
+      }
     },
     setTheme(theme) {
       const id = typeof theme === 'object' ? theme.id : theme;
       if (themeInitialized && currentTheme === id) return;
       themeInitialized = true;
       currentTheme = id || 'bamboo';
-      const colors = themeColors[currentTheme] || themeColors.bamboo;
       const night = currentTheme === 'moon';
-      const haze = night
-        ? '#263846'
-        : currentTheme === 'dawn'
-          ? '#bca58b'
-          : currentTheme === 'snow'
-            ? '#c5ced0'
-            : '#aebbb2';
-      scene.background.set(night ? '#182937' : colors[0]);
-      scene.fog.color.set(haze);
+      scene.background.set(night ? '#182937' : '#9dd4f0');
+      scene.fog.color.set(night ? '#263846' : '#c3e5f3');
+      scene.fog.density = night ? 0.0018 : 0.0011;
       sky.visible = !night;
-      sunlight.intensity = night ? 0.5 : 3.8;
-      ambient.intensity = night ? 0.65 : 0.85;
-      renderer.toneMappingExposure = night ? 1.1 : 0.94;
-      sunlight.color.set(night ? '#e6ebff' : currentTheme === 'dawn' ? '#ffd5a0' : '#ffe4b5');
+      sunlight.intensity = night ? 0.65 : 3.4;
+      ambient.intensity = night ? 0.75 : 1.1;
+      renderer.toneMappingExposure = night ? 1.12 : 1.05;
+      sunlight.color.set(night ? '#e6ebff' : '#fff1d1');
     },
     setMoveInput(strafe, forward) {
       moveInput.strafe = clamp(Number(strafe) || 0, -1, 1);
@@ -1075,6 +1253,7 @@ export function createScene(
     },
     dispose() {
       disposed = true;
+      clearTimeout(interactionTimer);
       view.dispose();
       cancelAnimationFrame(frame);
       clearInterval(movementTimer);

@@ -1,11 +1,12 @@
 import { Raycaster, Vector3 } from 'three';
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const DEFAULT_DISTANCE = 3.6;
-const DEFAULT_PITCH = 0.09;
-const PIVOT_HEIGHT = 1.3;
-const SHOULDER_OFFSET = 0.45;
-const LOOK_AHEAD = 2.4;
+const DEFAULT_DISTANCE = 2.9;
+const DEFAULT_PITCH = 0.08;
+const PIVOT_HEIGHT = 0.88;
+const SHOULDER_OFFSET = 0.28;
+const LOOK_AHEAD = 1.8;
+const DRAG_THRESHOLD = 4;
 
 /** A ground-level, over-the-shoulder camera; gameplay positions stay server-owned. */
 export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
@@ -44,20 +45,23 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
   }
 
   function releaseDrag() {
-    if (drag && canvas.hasPointerCapture?.(drag.id)) {
+    const previous = drag;
+    drag = null;
+    if (previous && canvas.hasPointerCapture?.(previous.id)) {
       try {
-        canvas.releasePointerCapture(drag.id);
+        canvas.releasePointerCapture(previous.id);
       } catch {
         /* Already released. */
       }
     }
-    drag = null;
   }
 
   function pointerDown(event) {
     if (disposed || blocked() || locked()) return;
-    if (event.button !== 2 && event.pointerType !== 'touch') return;
+    if (event.isPrimary === false) return;
+    if (event.button !== 0 && event.button !== 2 && event.pointerType !== 'touch') return;
     releaseDrag();
+    suppressClick = false;
     drag = {
       id: event.pointerId,
       x: event.clientX,
@@ -67,7 +71,7 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
       touch: event.pointerType === 'touch',
       moved: false,
     };
-    if (!drag.touch) event.preventDefault();
+    if (event.button === 2) event.preventDefault();
     try {
       canvas.setPointerCapture(event.pointerId);
     } catch {
@@ -80,8 +84,8 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
     if (locked() || !drag || drag.id !== event.pointerId) return;
     if (blocked()) return releaseDrag();
     const total = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-    if (total > 5) drag.moved = true;
-    if (drag.moved || !drag.touch) {
+    if (total > DRAG_THRESHOLD) drag.moved = true;
+    if (drag.moved) {
       rotate(event.clientX - drag.x, event.clientY - drag.y);
       suppressClick = true;
       suppressUntil = performance.now() + 450;
@@ -122,16 +126,10 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
       await canvas.requestPointerLock();
       return locked();
     } catch {
-      // Restricted iframes can deny pointer lock. Right-drag remains available.
+      // Dragging the background works even when an embedded view denies lock.
       onViewChange?.({ locked: false });
       return false;
     }
-  }
-
-  function doubleClick(event) {
-    if (event.button !== 0 || blocked()) return;
-    event.preventDefault();
-    requestLook();
   }
 
   function contextMenu(event) {
@@ -148,7 +146,6 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
   canvas.addEventListener('pointercancel', pointerUp);
   canvas.addEventListener('lostpointercapture', pointerUp);
   canvas.addEventListener('contextmenu', contextMenu);
-  canvas.addEventListener('dblclick', doubleClick);
   doc.addEventListener('mousemove', mouseMove);
   doc.addEventListener('pointerlockchange', lockChange);
   win.addEventListener('blur', blur);
@@ -173,7 +170,7 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
     const horizontal = Math.cos(pitch) * distance;
     desiredCamera.set(
       pivot.x - sin * horizontal + cos * SHOULDER_OFFSET,
-      Math.max(0.65, pivot.y + Math.sin(pitch) * distance),
+      Math.max(0.45, pivot.y + Math.sin(pitch) * distance),
       pivot.z + cos * horizontal + sin * SHOULDER_OFFSET,
     );
     cameraDirection.subVectors(desiredCamera, pivot);
@@ -189,7 +186,7 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
           .copy(pivot)
           .addScaledVector(cameraDirection, Math.max(0.35, hit.distance - 0.18));
     }
-    desiredCamera.y = Math.max(0.65, desiredCamera.y);
+    desiredCamera.y = Math.max(0.45, desiredCamera.y);
     actualDistance = desiredCamera.distanceTo(pivot);
     camera.position.copy(desiredCamera);
     lookTarget.set(pivot.x + sin * LOOK_AHEAD, pivot.y, pivot.z - cos * LOOK_AHEAD);
@@ -208,10 +205,11 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
       distance = targetDistance = DEFAULT_DISTANCE;
       initialized = false;
       releaseDrag();
+      suppressClick = false;
       if (position) update(position, 0);
     },
     zoom(delta) {
-      if (Number.isFinite(delta)) targetDistance = clamp(targetDistance - delta * 0.35, 2.2, 6.5);
+      if (Number.isFinite(delta)) targetDistance = clamp(targetDistance - delta * 0.35, 1.8, 5.5);
     },
     rotate,
     movement(strafe, forward) {
@@ -242,7 +240,6 @@ export function createThirdPersonCamera({ camera, canvas, onViewChange } = {}) {
       canvas.removeEventListener('pointercancel', pointerUp);
       canvas.removeEventListener('lostpointercapture', pointerUp);
       canvas.removeEventListener('contextmenu', contextMenu);
-      canvas.removeEventListener('dblclick', doubleClick);
       doc.removeEventListener('mousemove', mouseMove);
       doc.removeEventListener('pointerlockchange', lockChange);
       win.removeEventListener('blur', blur);

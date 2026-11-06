@@ -1,0 +1,26 @@
+염주 온라인 — 녹음 음원 출처
+
+목탁: 「Mokugyo.wav」 — jonopodmore
+원문: https://freesound.org/people/jonopodmore/sounds/607215/
+이용허락: CC0 1.0
+https://creativecommons.org/publicdomain/zero/1.0/
+실제 목탁·목어 타격 녹음입니다. useht/dongjane에 재배포된 한 번 타격 구간을 44.1kHz 모노 PCM WAV로 디코딩했습니다.
+재배포 출처: https://github.com/useht/dongjane/blob/main/packages/client/public/audio/mokt.mp3
+출처 설명: https://github.com/useht/dongjane/blob/main/packages/client/src/assets/audio/sources.md
+파일: moktak-hit.wav, 0.626939초
+
+독경·염불: 「염불소리1」 — 김용배
+제공: 한국저작권위원회 공유마당
+원문: https://gongu.copyright.or.kr/gongu/wrt/wrt/view.do?menuNo=200020&wrtSn=13254274
+이용허락: CC BY(저작자 표시). 원문에 인용된 이용허락을 따릅니다.
+재배포본의 이용허락 안내에는 CC BY 4.0이 명시되어 있습니다.
+https://creativecommons.org/licenses/by/4.0/
+실제 취득한 MP3: https://raw.githubusercontent.com/davidkimyang/metatemple/351c9d843926cc1dace323c4e65da58413e0d924/public/audio/temple-chant-review-v1.mp3
+이용허락 안내: https://raw.githubusercontent.com/davidkimyang/metatemple/351c9d843926cc1dace323c4e65da58413e0d924/public/audio/temple-chant-review-v1.license.txt
+원본 WAV의 119.4초 전 구간을 유지하여 모노·48kHz·112kbps MP3로 인코딩하고 음량을 약 -20 LUFS로 정규화한 재배포본을 변경 없이 포함했습니다.
+구절 순서·속도·음높이는 바꾸지 않았습니다. 반야심경 완독본 또는 정식 예불 전체를 뜻하지 않습니다.
+파일: buddhist-chant.mp3, 119.4초
+
+게임에서 배경음은 선택한 뒤에만 재생하며, 목탁은 두드린 본인의 브라우저에서만 재생합니다.
+저작자·제공기관·재배포 프로젝트의 후원 또는 보증을 뜻하지 않습니다.
+원 출처 안내의 사본: /audio/source-notices.txt
